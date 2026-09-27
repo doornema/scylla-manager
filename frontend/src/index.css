@@ -1,0 +1,116 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: 'Vazirmatn', system-ui, -apple-system, sans-serif;
+  @apply bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 transition-colors;
+}
+
+html {
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+@layer components {
+  .btn {
+    @apply px-4 py-2 rounded-lg font-medium transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-scylla-600 text-white hover:bg-scylla-700
+      dark:bg-scylla-500 dark:hover:bg-scylla-600;
+  }
+  .btn-danger {
+    @apply btn bg-red-600 text-white hover:bg-red-700
+      dark:bg-red-600 dark:hover:bg-red-700;
+  }
+  .btn-ghost {
+    @apply btn bg-gray-100 dark:bg-gray-800
+      text-gray-700 dark:text-gray-200
+      hover:bg-gray-200 dark:hover:bg-gray-700;
+  }
+  .input {
+    @apply w-full px-3 py-2
+      border border-gray-300 dark:border-gray-700
+      rounded-lg
+      bg-white dark:bg-gray-900
+      text-gray-900 dark:text-gray-100
+      placeholder-gray-400 dark:placeholder-gray-500
+      focus:ring-2 focus:ring-scylla-500 focus:border-transparent outline-none
+      transition-colors;
+  }
+  .card {
+    @apply bg-white dark:bg-gray-900
+      rounded-xl shadow-sm
+      border border-gray-100 dark:border-gray-800
+      p-6 transition-colors;
+  }
+  .badge-pk {
+    @apply px-2 py-0.5 rounded text-xs
+      bg-blue-50 dark:bg-blue-950
+      text-blue-700 dark:text-blue-300;
+  }
+  .badge-ck {
+    @apply px-2 py-0.5 rounded text-xs
+      bg-purple-50 dark:bg-purple-950
+      text-purple-700 dark:text-purple-300;
+  }
+  .badge-regular {
+    @apply px-2 py-0.5 rounded text-xs
+      bg-gray-100 dark:bg-gray-800
+      text-gray-600 dark:text-gray-400;
+  }
+  .badge-static {
+    @apply px-2 py-0.5 rounded text-xs
+      bg-amber-50 dark:bg-amber-950
+      text-amber-700 dark:text-amber-300;
+  }
+  .code-block {
+    @apply font-mono text-xs
+      bg-gray-900 dark:bg-black
+      text-green-400
+      p-4 rounded-lg overflow-x-auto whitespace-pre-wrap break-all
+      ltr-input;
+  }
+}
+
+/* اسکرول‌بار در حالت دارک */
+.dark ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.dark ::-webkit-scrollbar-track {
+  background: #1f2937;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: #4b5563;
+  border-radius: 5px;
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #6b7280;
+}
+
+/* RTL adjustments */
+[dir="rtl"] .ltr-input {
+  direction: ltr;
+  text-align: left;
+}
+
+/* Smooth transitions */
+* {
+  transition-property: background-color, border-color, color;
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  transition-property: background-color, border-color, color, box-shadow, transform;
+  transition-duration: 150ms;
+}

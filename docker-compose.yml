@@ -1,0 +1,55 @@
+services:
+  # scylla:
+  #   image: scylladb/scylla:6.2
+  #   container_name: scylla-db
+  #   command: >
+  #     --smp 2
+  #     --memory 2G
+  #     --overprovisioned 1
+  #     --developer-mode 1
+  #     --api-address 0.0.0.0
+  #     --prometheus-address 0.0.0.0
+  #   volumes:
+  #     - scylla_data:/var/lib/scylla
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "cqlsh -e 'SELECT now() FROM system.local' || exit 1"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 30
+  #     start_period: 90s
+  #   networks:
+  #     - scylla-net
+  #   restart: unless-stopped
+  #   # توجه: هیچ پورتی به بیرون expose نمی‌شود
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: scylla-manager:latest
+    container_name: scylla-app
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - SCYLLA_HOSTS=scylla
+      - SCYLLA_PORT=9042
+      - SCYLLA_DC=datacenter1
+      - SCYLLA_USER=${SCYLLA_USER:-cassandra}
+      - SCYLLA_PASS=${SCYLLA_PASS:-cassandra}
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production-use-long-random-secret}
+      - JWT_EXPIRES=${JWT_EXPIRES:-8h}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+    ports:
+      - "8090:3000"        
+    networks:
+      - shared-network
+    restart: unless-stopped
+
+volumes:
+  scylla_data:
+
+networks:
+  shared-network:
+    external: true
+    driver: bridge
