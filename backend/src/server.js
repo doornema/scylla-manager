@@ -26,10 +26,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 /* ============================================================
-   BigInt Serializer — حیاتی برای سازگاری با ScyllaDB
-   ScyllaDB برای bigint/counter/varint/timestamp مقدار BigInt
-   برمی‌گرداند که JSON.stringify نمی‌تواند آن را سریالایز کند.
-   این replacer آن‌ها را به String تبدیل می‌کند.
+   BigInt Serializer — برای سازگاری با ScyllaDB
    ============================================================ */
 app.set('json replacer', (key, value) => {
   if (typeof value === 'bigint') {
@@ -38,23 +35,27 @@ app.set('json replacer', (key, value) => {
   return value;
 });
 
-/* امنیت */
+/* ============================================================
+   امنیت — پیکربندی سازگار با HTTP (بدون نیاز به SSL)
+   نکته: Helmet به‌طور پیش‌فرض هدر upgrade-insecure-requests را
+   ارسال می‌کند که مرورگر را مجبور به استفاده از HTTPS می‌کند.
+   این هدر برای محیط‌هایی که با IP و HTTP کار می‌کنند مشکل‌ساز است.
+   ============================================================ */
 app.use(
   helmet({
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "'unsafe-inline'"],
-        styleSrc: ["'self'", "'unsafe-inline'"],
-        imgSrc: ["'self'", "data:"],
-        connectSrc: ["'self'"],
-        fontSrc: ["'self'", "data:"],
-      },
-    },
+    // ⛔ غیرفعال کردن CSP پیش‌فرض که شامل upgrade-insecure-requests است
+    contentSecurityPolicy: false,
+    // ⛔ غیرفعال کردن هدرهایی که برای مبدأهای ناامن (IP + HTTP) هشدار می‌دهند
+    crossOriginOpenerPolicy: false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: false,
+    originAgentCluster: false,
+    // ✅ حفظ هدرهای مفید دیگر مثل X-Content-Type-Options, X-Frame-Options, ...
   })
 );
 
-app.use(cors({ origin: process.env.CORS_ORIGIN || false }));
+/* CORS — باز برای همه (چون پنل خودش همان مبدأ است) */
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
 
 /* Rate Limiting */
@@ -73,7 +74,7 @@ const loginLimiter = rateLimit({
 });
 app.use('/api/auth/login', loginLimiter);
 
-/* Routes */
+/* API Routes */
 app.use('/api/auth', authRoutes);
 app.use('/api/keyspaces', keyspaceRoutes);
 app.use('/api/tables', tableRoutes);
@@ -86,16 +87,20 @@ app.get('/api/health', (req, res) =>
   res.json({ ok: true, time: new Date().toISOString() })
 );
 
-/* Static Frontend */
+/* سرو کردن Static Frontend */
 if (fs.existsSync(PUBLIC_DIR)) {
   app.use(express.static(PUBLIC_DIR, { maxAge: '1h', index: false }));
+
+  // SPA fallback
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api')) return next();
     res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
   });
+} else {
+  console.warn('⚠️  public/ folder not found — running in API-only mode');
 }
 
-/* Error handler — با پشتیبانی از BigInt */
+/* مدیریت خطای نهایی */
 app.use((err, req, res, next) => {
   console.error('❌ Unhandled error:', err);
   const message = typeof err?.message === 'string' ? err.message : 'خطای داخلی سرور';
