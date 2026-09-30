@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import {
-  LayoutDashboard, Database, Table2, Activity, Eye, Terminal, Menu, X,
+  LayoutDashboard, Database, Table2, Activity, Eye, Terminal, Menu, X,HardDriveDownload
 } from 'lucide-react';
 import { useState } from 'react';
 
@@ -11,6 +11,7 @@ const links = [
   { to: '/data', label: 'مرور داده', icon: Eye },
   { to: '/query', label: 'اجرای کوئری', icon: Terminal },
   { to: '/monitor', label: 'مانیتورینگ', icon: Activity },
+  { to: '/backup', label: 'بک‌آپ و ریستور', icon: HardDriveDownload },
 ];
 
 export default function Sidebar() {
@@ -74,10 +75,9 @@ export default function Sidebar() {
               end={to === '/'}
               onClick={() => setOpen(false)}
               className={({ isActive }) =>
-                `flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors ${
-                  isActive
-                    ? 'bg-scylla-50 dark:bg-scylla-950 text-scylla-700 dark:text-scylla-300'
-                    : 'text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100'
+                `flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors ${isActive
+                  ? 'bg-scylla-50 dark:bg-scylla-950 text-scylla-700 dark:text-scylla-300'
+                  : 'text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100'
                 }`
               }
             >

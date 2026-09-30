@@ -9,6 +9,7 @@ import Tables from './pages/Tables';
 import DataExplorer from './pages/DataExplorer';
 import Monitor from './pages/Monitor';
 import Query from './pages/Query';
+import Backup from './pages/Backup';
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -44,6 +45,7 @@ export default function App() {
               <Route path="data" element={<DataExplorer />} />
               <Route path="query" element={<Query />} />
               <Route path="monitor" element={<Monitor />} />
+              <Route path="backup" element={<Backup />} />
             </Route>
           </Routes>
         </BrowserRouter>

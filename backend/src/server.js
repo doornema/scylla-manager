@@ -14,6 +14,7 @@ import dataRoutes from './routes/data.js';
 import monitorRoutes from './routes/monitor.js';
 import indexRoutes from './routes/indexes.js';
 import queryRoutes from './routes/query.js';
+import backupRoutes from './routes/backup.js';
 
 import { getClient, closeClient } from './config/db.js';
 
@@ -82,6 +83,7 @@ app.use('/api/data', dataRoutes);
 app.use('/api/monitor', monitorRoutes);
 app.use('/api/indexes', indexRoutes);
 app.use('/api/query', queryRoutes);
+app.use('/api/backup', backupRoutes);
 
 app.get('/api/health', (req, res) =>
   res.json({ ok: true, time: new Date().toISOString() })

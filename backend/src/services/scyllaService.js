@@ -226,12 +226,27 @@ export async function insertRow(keyspace, table, data) {
 }
 
 export async function updateRow(keyspace, table, data, where, whereParams) {
-  const setClause = Object.keys(data)
+  const pkNames = (where || '')
+    .split(/\s+AND\s+/i)
+    .map((part) => part.split('=')[0].trim());
+
+  const safeData = {};
+  Object.entries(data).forEach(([key, value]) => {
+    if (!pkNames.includes(key)) {
+      safeData[key] = value;
+    }
+  });
+
+  if (Object.keys(safeData).length === 0) {
+    throw new Error('هیچ فیلد غیر-کلیدی برای به‌روزرسانی وجود ندارد');
+  }
+
+  const setClause = Object.keys(safeData)
     .map((c) => `${quoteId(c)} = ?`)
     .join(', ');
   const cql = `UPDATE ${quoteId(keyspace)}.${quoteId(table)}
     SET ${setClause} WHERE ${where}`;
-  await executeQuery(cql, [...Object.values(data), ...whereParams]);
+  await executeQuery(cql, [...Object.values(safeData), ...whereParams]);
 }
 
 export async function deleteRow(keyspace, table, where, whereParams) {

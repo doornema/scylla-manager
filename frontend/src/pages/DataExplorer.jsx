@@ -311,39 +311,52 @@ export default function DataExplorer() {
   };
 
   const handleSubmit = async (e) => {
-    e.preventDefault();
-    setError('');
-    try {
-      if (editing) {
-        const pkCols = columns.filter(
-          (c) => c.kind === 'partition_key' || c.kind === 'clustering'
-        );
-        const whereParts = [];
-        const whereParams = [];
-        pkCols.forEach((c) => {
-          whereParts.push(`${c.name} = ?`);
-          whereParams.push(formData[c.name]);
-        });
-        await api.put('/data', {
-          keyspace: selectedKs,
-          table: selectedTable,
-          data: formData,
-          where: whereParts.join(' AND '),
-          whereParams,
-        });
-      } else {
-        await api.post('/data', {
-          keyspace: selectedKs,
-          table: selectedTable,
-          data: formData,
-        });
-      }
-      setShowForm(false);
-      loadData();
-    } catch (err) {
-      setError(err.response?.data?.error || 'خطا در ذخیره');
+  e.preventDefault();
+  setError('');
+  try {
+    if (editing) {
+      // ✅ جدا کردن فیلدهای Primary Key از فیلدهای عادی
+      const pkCols = columns.filter(
+        (c) => c.kind === 'partition_key' || c.kind === 'clustering'
+      );
+      const pkNames = pkCols.map((c) => c.name);
+
+      // فقط فیلدهای غیر-PK را در data قرار بده
+      const updateData = {};
+      Object.entries(formData).forEach(([key, value]) => {
+        if (!pkNames.includes(key)) {
+          updateData[key] = value;
+        }
+      });
+
+      // ساخت WHERE از روی Primary Key ها
+      const whereParts = [];
+      const whereParams = [];
+      pkCols.forEach((c) => {
+        whereParts.push(`${c.name} = ?`);
+        whereParams.push(formData[c.name]);
+      });
+
+      await api.put('/data', {
+        keyspace: selectedKs,
+        table: selectedTable,
+        data: updateData,           // ✅ فقط فیلدهای غیر-PK
+        where: whereParts.join(' AND '),
+        whereParams,
+      });
+    } else {
+      await api.post('/data', {
+        keyspace: selectedKs,
+        table: selectedTable,
+        data: formData,
+      });
     }
-  };
+    setShowForm(false);
+    loadData();
+  } catch (err) {
+    setError(err.response?.data?.error || 'خطا در ذخیره');
+  }
+};
 
   const handleDelete = async (row) => {
     if (!confirm('آیا از حذف این ردیف مطمئن هستید؟')) return;
