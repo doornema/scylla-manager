@@ -20,11 +20,17 @@ export async function streamKeyspaceBackup(keyspace) {
   archive.pipe(output);
   archive.on('error', (err) => output.destroy(err));
 
-  // ۱. تولید schema.cql
   const schemaParts = [];
+  const missingSchema = [];
+
   for (const table of tables) {
     try {
       const info = await getTableFullInfo(keyspace, table);
+      if (!info.cql || info.cql.trim() === '') {
+        missingSchema.push(table);
+        schemaParts.push(`-- ⚠️ کوئری CREATE TABLE برای ${table} یافت نشد`);
+        continue;
+      }
       schemaParts.push(`-- Table: ${table}`);
       schemaParts.push(info.cql);
       if (info.indexCqls && info.indexCqls.length > 0) {
@@ -32,12 +38,12 @@ export async function streamKeyspaceBackup(keyspace) {
       }
       schemaParts.push('');
     } catch (e) {
+      missingSchema.push(table);
       schemaParts.push(`-- ⚠️ خطا در دریافت schema جدول ${table}: ${e.message}`);
     }
   }
   archive.append(schemaParts.join('\n'), { name: 'schema.cql' });
 
-  // ۲. استخراج داده هر جدول به CSV
   for (const table of tables) {
     try {
       const csv = await exportTableToCsv(keyspace, table);
@@ -49,13 +55,13 @@ export async function streamKeyspaceBackup(keyspace) {
     }
   }
 
-  // ۳. متادیتا
   const meta = {
     exportedAt: new Date().toISOString(),
     sourceKeyspace: keyspace,
     tables,
+    missingSchema,
     tool: 'scylla-manager',
-    version: '1.0.0',
+    version: '1.2.0',
   };
   archive.append(JSON.stringify(meta, null, 2), { name: 'meta.json' });
 
@@ -93,7 +99,6 @@ function formatCsvValue(value) {
   if (value instanceof Date) return value.toISOString();
   if (Buffer.isBuffer(value)) return '0x' + value.toString('hex');
   if (typeof value === 'object') {
-    // برای UUID یا اشیای خاص که toString معتبر دارند
     try {
       return String(value);
     } catch {
@@ -115,6 +120,12 @@ function csvEscape(str) {
    Import / Restore
    ============================================================ */
 
+async function ensureKeyspace(keyspace) {
+  const cql = `CREATE KEYSPACE IF NOT EXISTS ${quoteId(keyspace)}
+    WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}`;
+  await executeQuery(cql);
+}
+
 export async function restoreKeyspaceFromZip(zipBuffer, targetKeyspace, options = {}) {
   const { skipSchema = false, skipData = false, truncateFirst = false } = options;
 
@@ -122,6 +133,7 @@ export async function restoreKeyspaceFromZip(zipBuffer, targetKeyspace, options 
   const files = directory.files;
 
   const schemaFile = files.find((f) => f.path === 'schema.cql');
+  const metaFile = files.find((f) => f.path === 'meta.json');
   const dataFiles = files.filter(
     (f) => f.path.startsWith('data/') && f.path.endsWith('.csv')
   );
@@ -130,25 +142,53 @@ export async function restoreKeyspaceFromZip(zipBuffer, targetKeyspace, options 
     schemaExecuted: false,
     tablesRestored: [],
     errors: [],
+    warnings: [],
     createdTables: [],
     skippedTables: [],
+    keyspaceCreated: false,
+    schemaLog: [],
+    meta: null,
+    schemaContent: null,
   };
 
-  // ۱. اجرای schema و ثبت جداول ساخته‌شده
+  // خواندن meta.json
+  if (metaFile) {
+    try {
+      result.meta = JSON.parse((await metaFile.buffer()).toString('utf-8'));
+    } catch { /* ignore */ }
+  }
+
+  // خواندن schema.cql (برای نمایش به کاربر)
+  if (schemaFile) {
+    try {
+      result.schemaContent = (await schemaFile.buffer()).toString('utf-8');
+    } catch { /* ignore */ }
+  }
+
+  // ۱. ساخت Keyspace
+  try {
+    await ensureKeyspace(targetKeyspace);
+    result.keyspaceCreated = true;
+  } catch (e) {
+    result.errors.push(`خطا در ساخت Keyspace: ${e.message}`);
+    return result;
+  }
+
+  // ۲. اجرای schema
   const createdTableNames = new Set();
   if (!skipSchema && schemaFile) {
     try {
-      const schemaContent = (await schemaFile.buffer()).toString('utf-8');
+      const schemaContent = result.schemaContent;
       const schemaResult = await executeSchemaCql(schemaContent, targetKeyspace);
       result.schemaExecuted = true;
       result.createdTables = schemaResult.createdTables;
+      result.schemaLog = schemaResult.executionLog;
       result.errors.push(...schemaResult.errors);
       schemaResult.createdTables.forEach((t) => createdTableNames.add(t));
     } catch (e) {
       result.errors.push(`خطا در اجرای schema: ${e.message}`);
     }
   } else if (skipSchema) {
-    // اگر schema رد شد، جدول‌های موجود در targetKeyspace را پیدا کن
     try {
       const existing = await executeQuery(
         `SELECT table_name FROM system_schema.tables WHERE keyspace_name = ?`,
@@ -158,21 +198,33 @@ export async function restoreKeyspaceFromZip(zipBuffer, targetKeyspace, options 
     } catch { /* ignore */ }
   }
 
-  // ۲. صبر برای propagation schema
+  // ۳. صبر برای propagation کامل (tables + columns)
   if (createdTableNames.size > 0) {
-    await waitForTables(targetKeyspace, [...createdTableNames], 15000);
+    await waitForTablesWithColumns(targetKeyspace, [...createdTableNames], 30000);
   }
 
-  // ۳. ایمپورت داده
+  // ۴. بررسی سلامت جداول در فایل داده
+  for (const file of dataFiles) {
+    const tableName = file.path.replace('data/', '').replace('.csv', '');
+    const exists = await tableExistsWithColumns(targetKeyspace, tableName);
+    if (!exists) {
+      result.warnings.push(
+        `جدول "${tableName}" در فایل داده وجود دارد اما در دیتابیس یافت نشد — احتمالاً CREATE TABLE آن در بک‌آپ نبوده است`
+      );
+    }
+  }
+
+  // ۵. ایمپورت داده
   if (!skipData) {
     for (const file of dataFiles) {
       const tableName = file.path.replace('data/', '').replace('.csv', '');
 
-      // اگر جدول ساخته نشده، از import صرف‌نظر کن
-      if (createdTableNames.size > 0 && !createdTableNames.has(tableName)) {
+      // بررسی نهایی وجود جدول
+      const exists = await tableExistsWithColumns(targetKeyspace, tableName);
+      if (!exists) {
         result.skippedTables.push({
           table: tableName,
-          reason: 'جدول ساخته نشده یا یافت نشد',
+          reason: 'جدول در دیتابیس وجود ندارد',
         });
         continue;
       }
@@ -209,28 +261,33 @@ export async function restoreKeyspaceFromZip(zipBuffer, targetKeyspace, options 
 }
 
 /**
- * جایگزینی نام Keyspace در تمام دستورات CQL موجود در schema
+ * بررسی وجود جدول به همراه ستون‌های آن
  */
+async function tableExistsWithColumns(keyspace, table) {
+  try {
+    const res = await executeQuery(
+      `SELECT column_name FROM system_schema.columns
+       WHERE keyspace_name = ? AND table_name = ? LIMIT 1`,
+      [keyspace, table]
+    );
+    return res.rows.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 function replaceKeyspaceInSchema(cql, newKeyspace) {
-  // الگوهای کلیدی که بعد از آن‌ها نام keyspace.table می‌آید
-  // شامل: FROM, INTO, TABLE, UPDATE, ON (در CREATE INDEX و GRANT)
   const patterns = [
-    // CREATE TABLE [IF NOT EXISTS] ks.tbl
     /\b(TABLE)\s+(IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\s*\./gi,
-    // CREATE INDEX name ON ks.tbl
     /\b(ON)\s+([a-z_][a-z0-9_]*)\s*\./gi,
-    // SELECT/INSERT/UPDATE/DELETE ... FROM/INTO/UPDATE ks.tbl
     /\b(FROM|INTO|UPDATE)\s+([a-z_][a-z0-9_]*)\s*\./gi,
-    // ALTER TABLE ks.tbl / DROP TABLE ks.tbl
     /\b(ALTER|DROP)\s+(TABLE|KEYSPACE)\s+(IF\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\s*\./gi,
   ];
 
   let result = cql;
 
   for (const pattern of patterns) {
-    result = result.replace(pattern, (match, ...args) => {
-      // آخرین آرگومان‌ها: offset, string, groups?
-      // ساده‌تر: با indexOf پیدا می‌کنیم و اولین keyspace را جایگزین می‌کنیم
+    result = result.replace(pattern, (match) => {
       const keyspaceMatch = match.match(/([a-z_][a-z0-9_]*)\s*\.\s*$/i);
       if (!keyspaceMatch) return match;
       const oldKs = keyspaceMatch[1];
@@ -243,12 +300,17 @@ function replaceKeyspaceInSchema(cql, newKeyspace) {
 }
 
 /**
- * اجرای محتوای schema.cql با جایگزینی نام Keyspace
+ * اجرای schema.cql — ابتدا جدول‌ها، سپس ایندکس‌ها با retry
  */
 async function executeSchemaCql(schemaContent, targetKeyspace) {
   const statements = splitCqlStatements(schemaContent);
   const createdTables = [];
   const errors = [];
+  const executionLog = [];
+
+  const tableStatements = [];
+  const indexStatements = [];
+  const otherStatements = [];
 
   for (const stmt of statements) {
     const trimmed = stmt.trim();
@@ -256,60 +318,152 @@ async function executeSchemaCql(schemaContent, targetKeyspace) {
 
     const finalCql = replaceKeyspaceInSchema(trimmed, targetKeyspace);
 
-    // استخراج نام جدول از CREATE TABLE
-    const createTableMatch = finalCql.match(
+    if (/^\s*CREATE\s+TABLE\b/i.test(finalCql)) {
+      tableStatements.push(finalCql);
+    } else if (/^\s*CREATE\s+(?:CUSTOM\s+)?INDEX\b/i.test(finalCql)) {
+      indexStatements.push(finalCql);
+    } else {
+      otherStatements.push(finalCql);
+    }
+  }
+
+  // === مرحله ۱: CREATE TABLE ===
+  for (const cql of tableStatements) {
+    const match = cql.match(
       /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)/i
     );
+    const tableName = match?.[2] || '?';
 
     try {
-      await executeQuery(finalCql);
-      if (createTableMatch) {
-        const ks = createTableMatch[1];
-        const tbl = createTableMatch[2];
-        if (ks.toLowerCase() === targetKeyspace.toLowerCase()) {
-          if (!createdTables.includes(tbl)) createdTables.push(tbl);
-        }
-      }
+      await executeQuery(cql);
+      if (!createdTables.includes(tableName)) createdTables.push(tableName);
+      executionLog.push({
+        type: 'table',
+        name: tableName,
+        status: 'created',
+        message: 'جدول با موفقیت ساخته شد',
+      });
     } catch (e) {
       const msg = e.message || '';
-      if (msg.includes('already exist')) {
-        // جدول از قبل وجود دارد — همچنان به عنوان جدول موجود در نظر بگیر
-        if (createTableMatch) {
-          const tbl = createTableMatch[2];
-          if (!createdTables.includes(tbl)) createdTables.push(tbl);
-        }
+      if (msg.includes('already exist') || msg.includes('already exists')) {
+        if (!createdTables.includes(tableName)) createdTables.push(tableName);
+        executionLog.push({
+          type: 'table',
+          name: tableName,
+          status: 'exists',
+          message: 'جدول از قبل وجود داشت',
+        });
       } else {
-        // خطاهای دیگر را در errors ثبت کن اما ادامه بده
-        errors.push(
-          `اجرای "${finalCql.substring(0, 100)}${finalCql.length > 100 ? '...' : ''}": ${msg}`
-        );
+        errors.push(`ساخت جدول "${tableName}": ${msg}`);
+        executionLog.push({
+          type: 'table',
+          name: tableName,
+          status: 'error',
+          message: msg,
+          cql: cql.substring(0, 200),
+        });
       }
     }
   }
 
-  return { createdTables, errors };
+  // === انتظار برای propagate جداول ===
+  if (createdTables.length > 0) {
+    await waitForTablesWithColumns(targetKeyspace, createdTables, 30000);
+  }
+
+  // === مرحله ۲: CREATE INDEX با retry ===
+  for (const cql of indexStatements) {
+    const match = cql.match(/CREATE\s+(?:CUSTOM\s+)?INDEX\s+([a-z_][a-z0-9_]*)?/i);
+    const indexName = match?.[1] || '(auto)';
+    let success = false;
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= 5 && !success; attempt++) {
+      try {
+        await executeQuery(cql);
+        success = true;
+        executionLog.push({
+          type: 'index',
+          name: indexName,
+          status: 'created',
+          message: 'ایندکس با موفقیت ساخته شد',
+        });
+      } catch (e) {
+        lastError = e.message || '';
+        if (lastError.includes('already exist') || lastError.includes('already exists')) {
+          success = true;
+          executionLog.push({
+            type: 'index',
+            name: indexName,
+            status: 'exists',
+            message: 'ایندکس از قبل وجود داشت',
+          });
+        } else if (attempt < 5) {
+          await new Promise((r) => setTimeout(r, 1500));
+        }
+      }
+    }
+
+    if (!success) {
+      errors.push(`ساخت ایندکس "${indexName}": ${lastError}`);
+      executionLog.push({
+        type: 'index',
+        name: indexName,
+        status: 'error',
+        message: lastError,
+        cql: cql.substring(0, 200),
+      });
+    }
+  }
+
+  // === مرحله ۳: سایر دستورات ===
+  for (const cql of otherStatements) {
+    try {
+      await executeQuery(cql);
+      executionLog.push({
+        type: 'other',
+        name: cql.substring(0, 60) + (cql.length > 60 ? '...' : ''),
+        status: 'ok',
+        message: 'با موفقیت اجرا شد',
+      });
+    } catch (e) {
+      errors.push(`اجرای دستور: ${e.message}`);
+      executionLog.push({
+        type: 'other',
+        name: cql.substring(0, 60),
+        status: 'error',
+        message: e.message,
+      });
+    }
+  }
+
+  return { createdTables, errors, executionLog };
 }
 
 /**
- * صبر تا زمانی که جداول در system_schema ظاهر شوند
+ * انتظار برای ظهور جداول و ستون‌هایشان در system_schema
  */
-async function waitForTables(keyspace, tableNames, timeoutMs = 15000) {
+async function waitForTablesWithColumns(keyspace, tableNames, timeoutMs = 30000) {
   const start = Date.now();
   const remaining = new Set(tableNames);
 
   while (Date.now() - start < timeoutMs && remaining.size > 0) {
     try {
       const res = await executeQuery(
-        `SELECT table_name FROM system_schema.tables WHERE keyspace_name = ?`,
+        `SELECT table_name, column_name FROM system_schema.columns
+         WHERE keyspace_name = ?`,
         [keyspace]
       );
-      const existing = new Set(res.rows.map((r) => r.table_name));
+      const tablesWithColumns = new Set();
+      for (const row of res.rows) {
+        if (row.column_name) tablesWithColumns.add(row.table_name);
+      }
       for (const t of [...remaining]) {
-        if (existing.has(t)) remaining.delete(t);
+        if (tablesWithColumns.has(t)) remaining.delete(t);
       }
       if (remaining.size === 0) return true;
     } catch { /* ignore */ }
-    await new Promise((r) => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, 500));
   }
 
   if (remaining.size > 0) {
@@ -362,21 +516,34 @@ function splitCqlStatements(text) {
 }
 
 /**
- * ایمپورت CSV با تبدیل نوع‌آگاه مقادیر
+ * ایمپورت CSV با retry برای schema lookup
  */
 async function importCsvToTable(keyspace, table, csvContent) {
   const lines = csvContent.split('\n').filter((l) => l.trim());
   if (lines.length < 2) return { imported: 0, skipped: 0, errors: [] };
 
-  // دریافت نوع ستون‌ها از system_schema
-  const schemaRes = await executeQuery(
-    `SELECT column_name, type FROM system_schema.columns
-     WHERE keyspace_name = ? AND table_name = ?`,
-    [keyspace, table]
-  );
+  // ✅ retry برای گرفتن ساختار ستون‌ها
+  let schemaRes = { rows: [] };
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    try {
+      schemaRes = await executeQuery(
+        `SELECT column_name, type FROM system_schema.columns
+         WHERE keyspace_name = ? AND table_name = ?`,
+        [keyspace, table]
+      );
+      if (schemaRes.rows.length > 0) break;
+    } catch (e) {
+      console.warn(`⚠️ خطا در lookup schema (تلاش ${attempt}): ${e.message}`);
+    }
+    if (attempt < 10) {
+      await new Promise((r) => setTimeout(r, 800));
+    }
+  }
 
   if (schemaRes.rows.length === 0) {
-    throw new Error(`ساختار جدول ${keyspace}.${table} یافت نشد`);
+    throw new Error(
+      `ساختار جدول ${keyspace}.${table} در system_schema یافت نشد — جدول ساخته نشده یا هنوز propagate نشده است`
+    );
   }
 
   const columnTypes = {};
@@ -420,14 +587,9 @@ async function importCsvToTable(keyspace, table, csvContent) {
   return { imported, skipped, errors };
 }
 
-/**
- * تبدیل یک مقدار CSV به نوع صحیح CQL
- */
 function convertCsvValue(rawValue, cqlType, columnName) {
-  // مقدار خالی → null (به‌جز رشته‌ها که می‌توانند خالی باشند)
   if (rawValue === '' || rawValue === undefined || rawValue === null) {
     const t = String(cqlType).toLowerCase().trim();
-    // برای انواع غیر-متنی، null برمی‌گردانیم
     if (['text', 'varchar', 'ascii'].includes(t)) return '';
     return null;
   }
@@ -435,7 +597,6 @@ function convertCsvValue(rawValue, cqlType, columnName) {
   const type = String(cqlType).toLowerCase().trim();
   const value = String(rawValue);
 
-  // ========== UUID / TimeUUID ==========
   if (type === 'uuid' || type === 'timeuuid') {
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (!uuidRegex.test(value)) {
@@ -446,7 +607,6 @@ function convertCsvValue(rawValue, cqlType, columnName) {
     return value;
   }
 
-  // ========== Timestamp ==========
   if (type === 'timestamp') {
     const d = new Date(value);
     if (isNaN(d.getTime())) {
@@ -455,9 +615,7 @@ function convertCsvValue(rawValue, cqlType, columnName) {
     return d;
   }
 
-  // ========== Date ==========
   if (type === 'date') {
-    // فرمت YYYY-MM-DD
     if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
       const d = new Date(value);
       if (isNaN(d.getTime())) {
@@ -468,13 +626,8 @@ function convertCsvValue(rawValue, cqlType, columnName) {
     return value;
   }
 
-  // ========== Time ==========
-  if (type === 'time') {
-    // فرمت HH:MM:SS[.mmm]
-    return value;
-  }
+  if (type === 'time') return value;
 
-  // ========== اعداد صحیح ==========
   if (['tinyint', 'smallint', 'int'].includes(type)) {
     const n = parseInt(value, 10);
     if (isNaN(n)) {
@@ -485,7 +638,6 @@ function convertCsvValue(rawValue, cqlType, columnName) {
 
   if (type === 'bigint' || type === 'counter') {
     if (/^-?\d+$/.test(value)) {
-      // برای مقادیر بزرگ از BigInt استفاده کن
       const num = Number(value);
       if (Number.isSafeInteger(num)) return num;
       return BigInt(value);
@@ -493,11 +645,8 @@ function convertCsvValue(rawValue, cqlType, columnName) {
     throw new Error(`عدد صحیح بزرگ نامعتبر در ستون "${columnName}": "${value}"`);
   }
 
-  if (type === 'varint') {
-    return value; // به‌صورت رشته ارسال می‌شود
-  }
+  if (type === 'varint') return value;
 
-  // ========== اعداد اعشاری ==========
   if (type === 'float' || type === 'double') {
     const n = parseFloat(value);
     if (isNaN(n)) {
@@ -506,11 +655,8 @@ function convertCsvValue(rawValue, cqlType, columnName) {
     return n;
   }
 
-  if (type === 'decimal') {
-    return value;
-  }
+  if (type === 'decimal') return value;
 
-  // ========== Boolean ==========
   if (type === 'boolean' || type === 'bool') {
     const lower = value.toLowerCase().trim();
     if (['true', '1', 't', 'yes'].includes(lower)) return true;
@@ -518,7 +664,6 @@ function convertCsvValue(rawValue, cqlType, columnName) {
     throw new Error(`Boolean نامعتبر در ستون "${columnName}": "${value}"`);
   }
 
-  // ========== Blob ==========
   if (type === 'blob') {
     if (value.startsWith('0x')) {
       return Buffer.from(value.slice(2), 'hex');
@@ -526,7 +671,6 @@ function convertCsvValue(rawValue, cqlType, columnName) {
     return Buffer.from(value, 'binary');
   }
 
-  // ========== مجموعه‌ها ==========
   if (type.startsWith('list<') || type.startsWith('set<')) {
     const innerType = type.slice(type.indexOf('<') + 1, -1);
     try {
@@ -534,7 +678,6 @@ function convertCsvValue(rawValue, cqlType, columnName) {
       if (!Array.isArray(arr)) return [convertCsvValue(arr, innerType, columnName)];
       return arr.map((v) => convertCsvValue(String(v), innerType, columnName));
     } catch {
-      // اگر JSON نبود، به عنوان یک آیتم واحد در نظر بگیر
       return [convertCsvValue(value, innerType, columnName)];
     }
   }
@@ -558,10 +701,7 @@ function convertCsvValue(rawValue, cqlType, columnName) {
     }
   }
 
-  if (type.startsWith('frozen<')) {
-    // برای frozen، مقدار را همان‌طور که هست ارسال می‌کنیم
-    return value;
-  }
+  if (type.startsWith('frozen<')) return value;
 
   if (type.startsWith('tuple<')) {
     try {
@@ -571,18 +711,11 @@ function convertCsvValue(rawValue, cqlType, columnName) {
     }
   }
 
-  // ========== inet ==========
-  if (type === 'inet') {
-    return value;
-  }
+  if (type === 'inet') return value;
 
-  // ========== متن ==========
   return value;
 }
 
-/**
- * تقسیم یک رشته در سطح بالا بر اساس کاما (با نادیده گرفتن کاماهای داخل <...>)
- */
 function splitTopLevel(str) {
   const parts = [];
   let current = '';
@@ -602,9 +735,6 @@ function splitTopLevel(str) {
   return parts;
 }
 
-/**
- * پارس یک خط CSV با پشتیبانی از کوتیشن
- */
 function parseCsvLine(line) {
   const values = [];
   let current = '';
